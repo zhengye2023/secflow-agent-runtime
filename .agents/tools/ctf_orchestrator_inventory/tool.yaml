@@ -1,0 +1,35 @@
+name: ctf_orchestrator_inventory
+description: Inspect the bundled CTF orchestrator skill assets and return a structured inventory.
+version: 1
+function: run
+args_schema:
+  type: object
+  properties: {}
+output_schema:
+  type: object
+  properties:
+    name:
+      type: string
+    root:
+      type: string
+    skill_count:
+      type: integer
+    bundled_skills:
+      type: array
+      items:
+        type: string
+    references:
+      type: array
+      items:
+        type: string
+    agent_configs:
+      type: array
+      items:
+        type: string
+risk_tags: []
+timeout_sec: 15
+env_policy: inherit
+working_dir: .
+interrupt_on_call: false
+memory_hooks: {}
+report_hooks: {}

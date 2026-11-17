@@ -1,0 +1,767 @@
+% !TeX program = xelatex
+\documentclass[UTF8,zihao=-4,a4paper,fontset=none]{ctexart}
+
+\usepackage[margin=2.5cm,headheight=15pt]{geometry}
+\usepackage{hyperref}
+\usepackage{bookmark}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{amsmath}
+\usepackage{fontspec}
+
+\IfFontExistsTF{TeX Gyre Pagella}{\setmainfont{TeX Gyre Pagella}}{\setmainfont{Georgia}}
+\IfFontExistsTF{TeX Gyre Heros}{\setsansfont{TeX Gyre Heros}}{\setsansfont{Arial}}
+\IfFontExistsTF{Cascadia Mono}{\setmonofont{Cascadia Mono}}{\setmonofont{Consolas}}
+\setCJKmainfont[Path=C:/Windows/Fonts/,AutoFakeBold=2.0]{NotoSerifSC-VF.ttf}
+\setCJKsansfont[Path=C:/Windows/Fonts/,AutoFakeBold=2.0]{NotoSansSC-VF.ttf}
+\setCJKmonofont[Path=C:/Windows/Fonts/,AutoFakeBold=2.0]{NotoSansSC-VF.ttf}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!60!black,
+  citecolor=blue!55!black,
+  pdftitle={DigAgent 项目报告},
+  pdfauthor={DigAgent 项目组}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{DigAgent 项目报告}
+\rhead{受控安全分析 Agent Runtime}
+\cfoot{\thepage}
+
+\setlist[itemize]{leftmargin=2em,itemsep=2pt,topsep=4pt}
+\setlist[enumerate]{leftmargin=2em,itemsep=2pt,topsep=4pt}
+\renewcommand\arraystretch{1.28}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\emergencystretch=2em
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  backgroundcolor=\color{gray!6},
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{green!40!black}
+}
+
+\newcommand{\code}[1]{\texttt{\footnotesize #1}}
+\newcommand{\repo}{\href{https://github.com/xjtu-wang/DigAgent}{xjtu-wang/DigAgent}}
+
+\begin{document}
+\sloppy
+
+\begin{titlepage}
+  \centering
+  \vspace*{1.8cm}
+  {\zihao{1}\bfseries DigAgent 项目报告\par}
+  \vspace{0.8cm}
+  {\Large 受控安全分析 Agent Runtime 的设计与实现分析\par}
+  \vspace{1.5cm}
+  \begin{tabular}{rl}
+    项目地址： & \repo \\
+    报告类型： & 课程/项目技术报告 \\
+    姓名： &\underline{\makebox[5cm][l]{王瑚\hspace{0.5cm}叶政\hspace{0.5cm}谢吕翔}} \\
+    专业班级： & 网安 2301 \\
+    日期： & 2026 年 5 月 26 日 \\
+  \end{tabular}
+  \vfill
+  \begin{minipage}{0.82\textwidth}
+    \small
+    \textbf{编制说明：}本报告依据 DigAgent 当前公开仓库的目录、README、\code{pyproject.toml}、核心模型文件以及上传的废稿技术文档进行重写。报告有意区分“当前已落地能力”和“未来规划能力”，对废稿中容易被误认为已经实现的 Docker 部署、CI/CD、多租户、复杂 RBAC、独立自研 DAG 调度器、OS 级沙盒等内容作了边界修正。
+  \end{minipage}
+\end{titlepage}
+
+\pagenumbering{Roman}
+\begin{abstract}
+DigAgent 是一个面向安全分析场景的受控 Agent Runtime。项目并不把大语言模型直接当作无边界执行器，而是通过会话、单次执行、工具清单、权限审批、事件流、证据、产物和报告等工程对象，将 LLM 的规划和推理能力约束在可审计、可恢复、可交付的系统流程中。当前代码以 \code{session/turn} 为主执行骨架，以 deepagents、LangGraph、LangChain 和 OpenAI-compatible ChatOpenAI 为模型运行基础，以 FastAPI 和 Server-Sent Events 提供后端服务和实时事件推送，以 React + Vite 构建 WebUI，以文件系统、NDJSON 和 SQLite checkpoint 保存业务数据与运行状态。
+
+本报告重点分析项目当前真实实现：多 Agent profile、Skills、Project Tools、MCP manifest、权限与审批、Workspace 与附件、TaskGraph 观测模型、CVE/KEV 情报检索、报告导出、文件化存储和前后端交互。与废稿相比，本报告将“独立自研 DAG 调度器”“Docker/CI/CD 已落地”“完整多租户 RBAC”“容器级安全沙盒”等尚未在当前仓库中落地的内容调整为未来规划或安全边界说明。
+\end{abstract}
+
+\tableofcontents
+\newpage
+\pagenumbering{arabic}
+
+\section{项目概述}
+
+\subsection{项目背景}
+
+安全分析任务通常具有长上下文、多工具、多步骤和高风险操作并存的特点。典型流程可能同时包含源码检索、网页抓取、漏洞情报检索、脚本验证、报告撰写和人工审批。传统人工流程在可复盘性和交付一致性方面成本较高，而直接让大语言模型调用 shell、网络或文件写入工具又会引入越权、误操作、提示注入和审计缺失等风险。
+
+DigAgent 的设计目标是把 LLM 能力放入一个受控运行时中：模型负责规划、分析和生成内容；系统负责工具边界、权限审批、证据沉淀、产物管理和报告导出。换言之，DigAgent 更接近“安全分析工作台 + Agent Runtime”，而不是单轮聊天机器人。
+
+\subsection{项目目标}
+
+当前仓库 README 将 DigAgent 定位为“受控安全分析 Agent 运行时”，其核心目标可以概括为以下几类：
+
+\begin{itemize}
+  \item \textbf{双入口交互：}支持 CLI 与 WebUI 两种使用方式，满足命令行任务执行和可视化工作台使用需求。
+  \item \textbf{会话化执行：}以长期 \code{SessionRecord} 和单次 \code{TurnRecord} 保存分析上下文，使一次分析可以持续对话、补充附件、触发审批并回看历史。
+  \item \textbf{多 Agent 协作：}通过 root supervisor 与多个 subagent profile 组织规划、深度分析、报告撰写和记忆整理等职责。
+  \item \textbf{能力解耦：}将本地 Skills、Project Tools 与 MCP manifest 分开管理，使知识层、执行层和外部能力入口相互隔离。
+  \item \textbf{权限审批：}对 shell、Python、文件写入、报告导出、CVE 同步等高风险动作设置 interrupt/approval 流程。
+  \item \textbf{可审计交付：}通过 evidence、artifact、event、approval、report 等记录形成可复盘的安全分析交付材料。
+\end{itemize}
+
+\subsection{适用范围与非目标}
+
+当前版本适用于单机环境下的受控安全分析辅助场景，包括 CTF 材料分析、中小型源码仓库安全审计、Web 公开面信息收集、CVE/KEV 漏洞情报关联以及 Markdown/PDF 报告交付。
+
+需要强调的是，当前仓库不应被描述为已经实现以下能力：多租户账号体系、复杂 RBAC、分布式 Agent 调度、容器级安全沙盒、完整 Skill 市场、自动化攻击平台、Docker 部署方案和 CI/CD 流水线。它们可以作为后续演进方向，但不属于当前代码的已落地功能。
+
+\subsection{资料来源与复核方法}
+
+本报告的事实依据包括：
+
+\begin{itemize}
+  \item GitHub 仓库 \repo 的 README、目录结构、\code{pyproject.toml}、\code{src/digagent/models.py} 等公开文件。
+  \item 上传的废稿 Word/PDF 技术文档，以及更贴近当前代码的 Markdown 技术文档。
+  \item 对 \code{.agents}、\code{src/digagent}、\code{webui}、\code{tests} 等目录职责的逐项核对。
+\end{itemize}
+
+本次文档编制环境无法在容器内直接解析 GitHub 域名完成 \code{git clone} 和本地运行，因此未插入实际运行截图，也未声明本地测试已通过。报告中的运行命令与测试命令来自仓库 README 和上传技术文档，作为复现建议列出。
+
+\section{仓库结构与技术栈}
+
+\subsection{仓库目录结构}
+
+当前仓库顶层目录体现了前后端分离、Agent 能力目录和测试目录并存的结构：
+
+\begin{lstlisting}[language=bash,caption={DigAgent 顶层目录结构（按公开仓库整理）}]
+DigAgent/
+|-- .agents/              # subagents、skills、tools、mcp、memory 等 Agent 能力配置
+|-- docs/                 # 项目文档
+|-- src/digagent/          # Python 后端、运行时、模型、存储、报告、CVE 等核心代码
+|-- tests/                # 后端测试
+|-- webui/                # React + Vite 前端
+|-- .env.example          # 环境变量示例
+|-- README.md             # 项目说明
+|-- pyproject.toml        # Python 项目元数据和依赖
+|-- requirements.txt      # Python 依赖清单
+`-- uv.lock               # uv 锁定文件
+\end{lstlisting}
+
+其中，\code{.agents} 是项目的能力组织中心，包含 subagents、skills、tools、MCP 和 memory 等子目录；\code{src/digagent} 是后端核心；\code{webui} 是前端应用；\code{tests} 保存测试用例。
+
+\subsection{技术栈}
+
+\begin{longtable}{p{0.18\textwidth}p{0.33\textwidth}p{0.39\textwidth}}
+\caption{DigAgent 当前主要技术栈}\label{tab:techstack}\\
+\toprule
+层级 & 技术/模块 & 当前作用 \\
+\midrule
+\endfirsthead
+\toprule
+层级 & 技术/模块 & 当前作用 \\
+\midrule
+\endhead
+Agent Runtime & deepagents、LangGraph、LangChain、langchain-openai & 构建 root agent、subagents、stream、checkpoint 和模型调用。 \\
+模型接入 & OpenAI-compatible ChatOpenAI & 通过 \code{OPENAI\_API\_KEY}、\code{BASE\_URL}、\code{MODEL} 接入兼容 OpenAI API 的模型服务。 \\
+后端服务 & FastAPI、Uvicorn、Typer & 提供 REST API、SSE 实时事件流、CLI 命令和服务启动入口。 \\
+数据建模 & Pydantic v2 & 定义 session、turn、task graph、approval、evidence、artifact、report、memory、CVE 等模型。 \\
+持久化 & 文件系统、NDJSON、SQLite checkpoint & 保存业务数据、追加型事件日志和 LangGraph checkpoint。 \\
+前端 & React 18、Vite、Tailwind CSS、lucide-react、react-markdown & 实现聊天工作台、时间线、Inspector、权限面板、设置页和报告展示。 \\
+报告 & markdown-it-py、Jinja2、Chrome/Node PDF renderer & 支持 Markdown、HTML 与 PDF 报告渲染。 \\
+网络与情报 & httpx、NVD、CISA KEV、Bing RSS & 实现 Web 抓取、搜索、CVE 同步和本地检索。 \\
+\bottomrule
+\end{longtable}
+
+从 \code{pyproject.toml} 看，后端要求 Python 3.12 及以上，并以 hatchling 作为构建后端；前端 \code{package.json} 使用 Vite 构建，测试脚本为 \code{node --test}。
+
+\subsection{分层架构}
+
+DigAgent 采用清晰的分层组织：交互层负责 CLI 和 WebUI；API 层负责 REST 与 SSE；Runtime 层负责 turn 生命周期、模型流和 subagent 协作；能力层负责 Skills、Project Tools 与 MCP；存储层负责文件化持久化。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw,rounded corners,align=center,text width=.86\textwidth,minimum height=9mm,font=\small},
+  >=Latex,node distance=4mm
+]
+\node[layer,fill=blue!7] (ui) {\textbf{交互层}：CLI（run/chat/approve/serve/tools-doctor）与 React + Vite WebUI（聊天、审批、Inspector、报告查看）};
+\node[layer,fill=cyan!7,below=of ui] (api) {\textbf{API 层}：FastAPI REST API 与 SSE 事件流，处理 session、turn、approval、attachment、artifact、report};
+\node[layer,fill=orange!10,below=of api] (runtime) {\textbf{Runtime 层}：TurnManager、deepagents/LangGraph runtime、stream 归纳、subagent 协作、workspace 构建};
+\node[layer,fill=green!8,below=of runtime] (cap) {\textbf{能力层}：Agent Profiles、Skills、Project Tools、MCP manifest、权限与 interrupt 配置};
+\node[layer,fill=gray!10,below=of cap] (storage) {\textbf{存储层}：FileStorage、NDJSON 事件、artifact blob、evidence、report、memory、CVE 索引、SQLite checkpoint};
+\draw[->,thick] (ui) -- (api);
+\draw[->,thick] (api) -- (runtime);
+\draw[->,thick] (runtime) -- (cap);
+\draw[->,thick] (runtime.west) .. controls +(-1.2,0) and +(-1.2,0) .. (storage.west);
+\draw[->,thick] (cap) -- (storage);
+\end{tikzpicture}
+\caption{DigAgent 分层架构}
+\end{figure}
+
+\section{核心功能设计}
+
+\subsection{多 Agent 协作模型}
+
+项目当前采用 root supervisor + configured subagents 的协作模式。profile 从 \code{.agents/subagents/*/agent.yaml} 加载，公开目录显示了以下内置 profile：\code{sisyphus-default}、\code{prometheus-planner}、\code{hephaestus-deepworker}、\code{report-writer}、\code{memory-curator}，并包含 \code{\_shared} 公共配置目录。
+
+\begin{longtable}{L{0.30\textwidth}L{0.22\textwidth}L{0.38\textwidth}}
+\caption{当前内置 Agent profile}\label{tab:profiles}\\
+\toprule
+Profile & 定位 & 当前职责与工具范围 \\
+\midrule
+\endfirsthead
+\toprule
+Profile & 定位 & 当前职责与工具范围 \\
+\midrule
+\endhead
+\code{sisyphus-default} & Root supervisor & 负责总控、调度、最终响应和受控执行；可见 task、文件读写、grep/glob、web、shell、Python、CVE、report export、CTF inventory 等工具。 \\
+\code{prometheus-planner} & Planner & 负责澄清、拆解、检索和任务规划；工具范围以读文件、搜索、web 和本地 CVE 检索为主。 \\
+\code{hephaestus-deepworker} & Deep worker & 负责仓库分析、附件分析、Web 行为分析、CTF/协议验证；可使用文件读写、web、shell、Python、CVE 和受控 MCP 能力。 \\
+\code{report-writer} & Report writer & 负责证据化总结和报告草稿；当前未配置可执行工具，体现了报告写作与工具执行的隔离。 \\
+\code{memory-curator} & Memory curator & 负责长期记忆整理；当前未配置工具，强调记忆维护职责。 \\
+\bottomrule
+\end{longtable}
+
+当前协作不是废稿中所描述的“完全自研 DAG 调度器驱动所有 Agent 并行执行”，而是依托 deepagents 的 subagent 能力和项目自己的 mention 链路完成。用户可以在 CLI/WebUI 中指定参与者，\code{TurnManager} 按 \code{addressed\_participants} 执行 participant step，并记录 handoff、assistant message 和 turn 状态。
+
+\subsection{Session 与 Turn 生命周期}
+
+当前主数据模型使用 \code{session/turn}，而不是旧文档中的 \code{session/run}。二者职责如下：
+
+\begin{itemize}
+  \item \code{SessionRecord}：长期对话容器，保存标题、状态、root profile、scope、权限覆盖、turn 列表、pending approvals、message preview、report refs 等。
+  \item \code{TurnRecord}：一次用户输入触发的受控执行单元，保存 profile、状态、用户任务、scope、task graph、approval ids、artifact ids、budget usage、final response 和错误信息。
+  \item \code{MessageRecord}：保存用户和 assistant 消息，可关联 artifact/evidence，并支持 speaker、participant 和 handoff 字段。
+\end{itemize}
+
+\code{TurnStatus} 包含 \code{created}、\code{planning}、\code{running}、\code{awaiting\_approval}、\code{awaiting\_user\_input}、\code{aggregating}、\code{reporting}、\code{completed}、\code{failed}、\code{cancelled}、\code{superseded}、\code{timed\_out}。当同一 session 出现新的 active turn 时，旧 turn 会被 supersede，避免多次执行互相覆盖。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=9mm,>=Latex,every node/.style={font=\small}]
+\node[draw,rounded corners,fill=blue!8,minimum width=28mm,minimum height=8mm] (msg) {用户消息};
+\node[draw,rounded corners,fill=cyan!8,right=of msg,minimum width=30mm,minimum height=8mm] (session) {SessionRecord};
+\node[draw,rounded corners,fill=orange!10,right=of session,minimum width=30mm,minimum height=8mm] (turn) {TurnRecord};
+\node[draw,rounded corners,fill=green!8,right=of turn,minimum width=34mm,minimum height=8mm] (runtime) {Runtime Stream};
+\node[draw,rounded corners,fill=gray!10,below=of turn,minimum width=42mm,minimum height=8mm] (persist) {事件/证据/产物/报告};
+\draw[->,thick] (msg) -- (session);
+\draw[->,thick] (session) -- node[above]{create/continue} (turn);
+\draw[->,thick] (turn) -- (runtime);
+\draw[->,thick] (runtime) -- node[right]{归纳与保存} (persist);
+\draw[->,thick] (persist) -- node[left]{更新 refs} (session);
+\end{tikzpicture}
+\caption{Session 与 Turn 执行关系}
+\end{figure}
+
+\subsection{TaskGraph 观测模型}
+
+项目保留了 \code{TaskGraph}、\code{TaskNode}、\code{TaskEdge} 和 \code{GraphEditOp} 模型，但当前实现中 TaskGraph 主要用于对 deepagents/LangGraph stream 进行归纳、展示和预算统计，而不是由独立 \code{GraphManager} 执行 ready-node 调度。
+
+\code{src/digagent/deepagents\_runtime/streaming.py} 会把 stream mode 中的 \code{tasks} 归纳为 \code{task\_node\_started}、\code{task\_node\_completed}、\code{task\_node\_waiting\_approval} 等事件；把 \code{updates} 归纳为 \code{graph\_op\_applied}；把 \code{messages} 提取为 assistant chunk live event。完整 turn graph 可通过 \code{/api/turns/\{turn\_id\}/graph} 按需读取。
+
+这一设计的优点是：前端可以获得工作流进度视图，同时避免将大量 raw LangGraph event 长期持久化造成历史膨胀。它的边界是：TaskGraph 不是项目当前的独立自研调度引擎，报告中不应把它写成已经实现的并行 DAG scheduler。
+
+\subsection{权限管控与审批}
+
+权限控制由三类机制共同构成：
+
+\begin{enumerate}
+  \item \textbf{Profile allowlist：}每个 Agent profile 限制可见工具和 MCP server。未出现在 allowlist 中的 project tool 不会暴露给模型。
+  \item \textbf{Session permission overrides：}前端可以在 session 级别设置 tool、risk tag、MCP server 的 allow/confirm/deny 规则，并可配置 auto approve。
+  \item \textbf{Interrupt-on approval：}需要人工确认的工具调用通过 deepagents interrupt 暂停，后端创建 \code{ApprovalRecord}，CLI/WebUI 审批后再 resume。
+\end{enumerate}
+
+当前 \code{permissions.py} 中默认需要确认的核心文件工具包括 \code{edit\_file} 与 \code{write\_file}；默认高风险标签包括 \code{shell\_exec}、\code{external\_exploit}、\code{open\_world\_recon}。Project tool manifest 也可以声明 \code{interrupt\_on\_call: true}，例如 \code{shell\_exec}、\code{python\_exec}、\code{cve\_sync\_sources}、\code{report\_export} 等工具通常需要审批。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm,>=Latex,scale=0.86,transform shape,every node/.style={font=\small}]
+\node[draw,rounded corners,fill=blue!8,align=center,text width=25mm] (request) {模型提出\\工具调用};
+\node[draw,rounded corners,fill=cyan!8,right=of request,align=center,text width=28mm] (policy) {allowlist\\overrides\\risk tags};
+\node[draw,diamond,aspect=2,fill=orange!12,right=of policy,align=center,text width=24mm] (decision) {是否需要\\确认?};
+\node[draw,rounded corners,fill=green!8,above right=of decision,align=center,text width=26mm] (run) {直接执行};
+\node[draw,rounded corners,fill=yellow!15,below right=of decision,align=center,text width=30mm] (approval) {创建 ApprovalRecord\\等待审批};
+\node[draw,rounded corners,fill=green!8,right=of approval,align=center,text width=26mm] (resume) {审批后 resume};
+\node[draw,rounded corners,fill=gray!10,right=of run,align=center,text width=28mm] (persist) {写入事件\\产物/证据};
+\draw[->,thick] (request) -- (policy);
+\draw[->,thick] (policy) -- (decision);
+\draw[->,thick] (decision) -- node[above]{否} (run);
+\draw[->,thick] (decision) -- node[right]{是} (approval);
+\draw[->,thick] (approval) -- (resume);
+\draw[->,thick] (resume) |- (persist);
+\draw[->,thick] (run) -- (persist);
+\end{tikzpicture}
+\caption{工具调用审批流程}
+\end{figure}
+
+\subsection{Workspace 与附件处理}
+
+Workspace 由 \path{src/digagent/deepagents_runtime/workspace.py} 管理。路径结构主要包括：
+
+\begin{lstlisting}[language=bash,caption={Workspace 路径结构}]
+data/workspaces/<session_id>/agents/<profile_name>/
+data/workspaces/<session_id>/turns/<turn_id>/attachments/
+\end{lstlisting}
+
+创建 workspace 时，系统会镜像项目 \code{.agents} 目录，将小型顶层输入文件复制到 workspace，物化 \code{scope.repo\_paths} 指定的仓库路径，把上传附件复制到 turn attachments 和 agent workspace 的 \code{attachments/}，并向 system prompt 注入 workspace root、session id、profile、scope 与附件路径。
+
+需要明确的是，workspace 是应用层上下文隔离，不等同于容器、虚拟机或 OS 级安全沙盒。一旦 \code{shell\_exec} 或 \code{python\_exec} 被批准，它们仍会在当前 agent workspace 的 \code{cwd} 下执行真实命令。因此，对于不可信二进制样本或高风险样本，仍应在外部沙盒中运行。
+
+\subsection{Skills、Project Tools 与 MCP}
+
+DigAgent 将知识、可执行能力和外部能力入口分离：
+
+\begin{itemize}
+  \item \textbf{Skills：}目录为 \code{.agents/skills/**/SKILL.md}。Skill 只提供方法论、Prompt、分析步骤和参考资料，不直接授予执行权限。
+  \item \textbf{Project Tools：}目录为 \code{.agents/tools/<tool>/tool.yaml} 与 \code{script.py}。manifest 声明名称、描述、参数 schema、输出 schema、风险标签、超时、环境策略和是否 interrupt。
+  \item \textbf{MCP：}目录为 \code{.agents/mcp/*.yaml}。当前公开目录包含 GitHub、Playwright 和 Shodan 三类 MCP manifest。MCP 工具只有在 server 启用、profile allowlist 允许、session overrides 未拒绝、环境变量和命令可用时才会注入 runtime。
+\end{itemize}
+
+\begin{longtable}{p{0.28\textwidth}p{0.60\textwidth}}
+\caption{当前公开 Project Tools}\label{tab:tools}\\
+\toprule
+工具目录 & 作用说明 \\
+\midrule
+\endfirsthead
+\toprule
+工具目录 & 作用说明 \\
+\midrule
+\endhead
+\code{ctf\_orchestrator\_inventory} & CTF/SKILL 能力清单或题目分析相关库存工具。 \\
+\code{cve\_fetch\_online} & 在线获取指定 CVE 或漏洞情报。 \\
+\code{cve\_search\_local} & 在本地 CVE 索引中检索漏洞记录。 \\
+\code{cve\_sync\_sources} & 同步 NVD/CISA KEV 等数据源，通常属于需审批操作。 \\
+\code{python\_exec} & 使用项目 Python 环境执行受控 Python 片段或脚本，需审批。 \\
+\code{report\_export} & 将报告导出为 Markdown/PDF 或生成 ad hoc 报告 artifact，需审批。 \\
+\code{shell\_exec} & 执行 shell 命令，具有较高风险，需审批。 \\
+\code{vuln\_kb\_lookup} & 漏洞知识库查询工具。 \\
+\code{web\_fetch} & 抓取网页内容，受网络范围与配置限制。 \\
+\code{web\_search} & 通过配置的搜索 provider 获取候选 URL。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{报告生成与导出}
+
+报告系统以 \code{ReportRecord}、\code{ReportDraft}、\code{ReportDossier} 和 \code{Finding} 为核心模型。\code{ReportValidator} 要求报告草稿基于 evidence-backed dossier，finding 必须引用有效 evidence refs，摘要不能为空，报告类型需要与任务意图和证据类型一致。
+
+\code{report\_export} 工具支持两类模式：
+
+\begin{itemize}
+  \item 导出已保存报告：根据 \code{report\_id} 或 session 的 \code{latest\_report\_id} 导出 Markdown/PDF。
+  \item ad hoc 导出：传入 \code{title + markdown} 生成报告 artifact。
+\end{itemize}
+
+Markdown 报告保存在 \code{data/reports/<report\_id>.md}，PDF 保存在 \code{data/reports/<report\_id>.pdf} 或 artifact blob 中。PDF 渲染优先使用 \code{webui/render-pdf.mjs}，否则使用 Chrome headless。
+
+\section{关键模块实现}
+
+\subsection{CLI 与 API 服务}
+
+CLI 位于 \path{src/digagent/cli.py}，使用 Typer 实现。当前主要命令包括：
+
+\begin{itemize}
+  \item \code{run}：创建 session 并执行单次任务。
+  \item \code{chat}：创建交互式 session 或执行初始任务。
+  \item \code{approve}：处理 pending approval。
+  \item \code{serve}：启动 Uvicorn + FastAPI。
+  \item \code{tools-doctor}：对 \code{web\_search}/\code{web\_fetch} 做健康检查。
+\end{itemize}
+
+API 位于 \path{src/digagent/api.py}，主要接口包括：
+
+\begin{longtable}{p{0.42\textwidth}p{0.46\textwidth}}
+\caption{主要 API 接口}\label{tab:api}\\
+\toprule
+接口 & 作用 \\
+\midrule
+\endfirsthead
+\toprule
+接口 & 作用 \\
+\midrule
+\endhead
+\code{GET /api/health} & 健康检查。 \\
+\code{GET /api/catalog} & 返回 profiles、skills、tools、MCP、memory catalog。 \\
+\code{GET /api/settings/summary} & 返回模型、环境变量、workspace、审批超时等摘要。 \\
+\code{/api/sessions} & 创建、列表、读取 session。 \\
+\code{/api/sessions/\{id\}/turns} & 在 session 下创建或读取 turn。 \\
+\code{/api/turns/\{id\}} & 读取、取消 turn。 \\
+\code{/api/sessions/\{id\}/events}、\code{/api/turns/\{id\}/events} & SSE live/history event stream。 \\
+\code{/api/turns/\{id\}/graph} & 获取持久化 TaskGraph 或 runtime graph。 \\
+\code{/api/approvals/\{id\}} & 解决审批。 \\
+\code{/api/sessions/\{id\}/attachments} & 上传附件并保存为 artifact。 \\
+\code{/api/evidence/\{id\}}、\code{/api/artifacts/\{id\}} & 读取证据和产物。 \\
+\code{/api/reports/\{id\}}、\code{/api/reports/\{id\}/download} & 查看和下载报告。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{TurnManager}
+
+\code{TurnManager} 是当前后端运行控制核心。它负责模型配置校验、mentions 与 artifact refs 校验、turn 创建、用户消息追加、session scope 更新、runtime handle 构建或复用、deepagents stream 执行、assistant chunk live event 记录、TaskGraph event 归纳、interrupt approval 存储、approval resume、turn cancel/fail/supersede/complete，以及为 WebUI 提供 session summary、turn detail、event history 和 graph detail。
+
+与旧文档中的 \code{RunManager} 相比，当前代码更强调 \code{Turn} 作为用户输入的执行单元。将“运行任务”命名为 \code{turn} 的好处是与对话式工作台一致：每次用户输入可以单独记录状态、审批、证据和产物，同时又归属同一长期 session。
+
+\subsection{Runtime Factory}
+
+当前 runtime 构建入口为 \path{src/digagent/deepagents_runtime/factory.py} 的 \code{build\_runtime()}。它执行以下流程：
+
+\begin{enumerate}
+  \item 解析 \code{.agents/subagents/<profile>/agent.yaml}，加载 profile 与 prompt。
+  \item 扫描 \code{.agents/skills}，将 skill source 注入 deepagents。
+  \item 创建 session/profile 对应 workspace，并拼接 workspace prompt context。
+  \item 根据 profile allowlist、MCP allowlist 和 session permission overrides 构建可用工具。
+  \item 使用 \code{ChatOpenAI} 创建真实模型客户端。
+  \item 使用 \code{FilesystemBackend} 创建 deepagents 文件后端。
+  \item 使用 \code{AsyncSqliteSaver} 将 checkpoint 写入 \code{data/langgraph-checkpoints.sqlite}。
+  \item 调用 \code{create\_deep\_agent()} 构建 root agent，并注入 subagents、permissions、\code{interrupt\_on} 以及 tool allowlist middleware。
+\end{enumerate}
+
+这里的 checkpoint 与业务持久化相互补充：checkpoint 用于恢复 LangGraph/deepagents 运行状态，FileStorage 则保存 session、turn、event、artifact、evidence、report 等业务数据。
+
+\subsection{存储层}
+
+\code{FileStorage} 使用文件系统作为当前持久化后端，目标是易于检查、迁移和调试。核心路径如下：
+
+\begin{longtable}{L{0.25\textwidth}L{0.60\textwidth}}
+\caption{FileStorage 核心路径}\label{tab:storage}\\
+\toprule
+数据 & 路径 \\
+\midrule
+\endfirsthead
+\toprule
+数据 & 路径 \\
+\midrule
+\endhead
+Session & \code{sessions/<session\_id>/session.json} \\
+Message & \code{sessions/<session\_id>/messages.ndjson} \\
+Turn & \code{sessions/<session\_id>/turns/<turn\_id>.json} \\
+Turn Event & \code{turns/<turn\_id>.events.ndjson} \\
+Approval & \code{sessions/\_approvals/<approval\_id>.json} \\
+Evidence & \code{evidence/<evidence\_id>.json} \\
+Artifact metadata & \code{artifacts/<artifact\_id>.json} \\
+Artifact blob & \code{artifacts/blob/<turn\_id>/...} \\
+Report & \code{reports/<report\_id>.json/.md/.pdf} \\
+Memory & \code{data/memory/} \\
+CVE & \code{data/CVE/raw}、\code{data/CVE/normalized}、\code{data/CVE/index} \\
+\bottomrule
+\end{longtable}
+
+存储层显式拒绝旧 session schema；对于旧 approval 中缺失 \code{turn\_id} 的记录，会尝试从 turn 引用中恢复，否则跳过并记录 warning。该处理说明项目已经从旧的 run/run\_id 思路过渡到 turn/turn\_id 模型，并在存储层做了兼容边界。
+
+\subsection{WebUI}
+
+WebUI 入口为 \code{webui/src/App.jsx}。前端启动时并行请求 \code{/api/catalog} 和 \code{/api/settings/summary}，然后渲染工作台或设置页。\code{webui/src/use-workspace-controller.js} 是前端状态控制核心，负责 session 列表、当前 workspace 加载、turn/message/timeline/Inspector 聚合、SSE 订阅、turn detail 历史按需加载，以及 permissions、scope、attachments、approval、cancel 等操作。
+
+主要组件包括 \code{chat-shell}、\code{session-sidebar}、\code{composer-mention-input}、\code{chat-timeline}、\code{inspector-execution-panel}、\code{permissions-panel}、\code{runtime-panels}、\code{settings-page} 和 \code{markdown-block}。前端依赖 React 18、Vite、Tailwind CSS、lucide-react、react-markdown 和 remark-gfm 等生态，适合实现实时聊天、Markdown 报告和 Inspector 面板。
+
+\subsection{CVE 与网络能力}
+
+\code{CveService} 支持从 NVD 和 CISA KEV 获取漏洞情报，归一化为 \code{CVERecord}，并建立 \code{by\_id}、\code{by\_cwe}、\code{by\_product}、\code{by\_keyword}、\code{by\_kev} 等索引。在线查询结果会合并写入本地缓存，本地检索工具可以在已有索引基础上离线工作。
+
+\code{NetworkToolset} 提供 \code{web\_search} 与 \code{web\_fetch}。\code{web\_fetch} 支持 GET/HEAD，返回标题、状态码、链接、正文摘要和错误标记；\code{web\_search} 使用配置的搜索 provider 返回结构化候选 URL，并显式标记 provider 不可达、不可用或空结果。
+
+\section{数据模型设计}
+
+\subsection{核心实体关系}
+
+\begin{lstlisting}[caption={核心实体关系（概念模型）}]
+SessionRecord
+  |-- MessageRecord[]
+  |-- TurnRecord[]
+  |   |-- TaskGraph
+  |   |-- ApprovalRecord[]
+  |   |-- EvidenceRecord[]
+  |   |-- ArtifactRecord[]
+  |   `-- ReportRecord?
+  |-- MemoryRecord[]
+  `-- Scope / PermissionOverrides
+\end{lstlisting}
+
+\subsection{主要模型}
+
+\begin{longtable}{L{0.22\textwidth}L{0.33\textwidth}L{0.35\textwidth}}
+\caption{核心 Pydantic 模型}\label{tab:models}\\
+\toprule
+模型 & 核心字段 & 作用 \\
+\midrule
+\endfirsthead
+\toprule
+模型 & 核心字段 & 作用 \\
+\midrule
+\endhead
+\code{SessionRecord} & \code{session\_id}、\code{status}、\code{scope}、\code{permission\_overrides}、\code{turn\_ids}、\code{pending\_approval\_ids}、\code{report\_refs} & 长期对话容器，维护上下文、权限、审批和报告引用。 \\
+\code{TurnRecord} & \code{turn\_id}、\code{profile\_name}、\code{status}、\code{user\_task}、\code{task\_graph}、\code{approval\_ids}、\code{artifact\_ids}、\code{final\_response} & 单次用户输入触发的受控执行单元。 \\
+\code{TaskGraph} & \code{nodes}、\code{edges}、\code{ready\_node\_ids}、\code{completed\_node\_ids}、\code{applied\_ops} & 记录和展示从 deepagents/LangGraph stream 归纳出的任务图。 \\
+\code{TaskNode} & \code{node\_id}、\code{kind}、\code{status}、\code{evidence\_refs}、\code{artifact\_refs}、\code{approval\_id} & 表示一个可观察的任务、工具、subagent、报告或导出节点。 \\
+\code{ApprovalRecord} & \code{approval\_id}、\code{action\_id}、\code{turn\_id}、\code{status}、\code{action\_digest} & 记录审批生命周期，支持 pending、approved、rejected、expired、superseded。 \\
+\code{ArtifactRecord} & \code{artifact\_id}、\code{kind}、\code{storage\_path}、\code{mime\_type}、\code{sha256} & 保存原始产物和附件的元数据。 \\
+\code{EvidenceRecord} & \code{evidence\_id}、\code{type}、\code{title}、\code{summary}、\code{source}、\code{artifact\_refs} & 保存可解释证据，与 artifact 分离。 \\
+\code{ReportRecord} & \code{report\_id}、\code{kind}、\code{summary}、\code{findings}、\code{evidence\_refs}、\code{export\_paths} & 保存报告元数据、发现、证据引用和导出路径。 \\
+\code{MemoryRecord} & \code{memory\_id}、\code{kind}、\code{summary}、\code{source\_evidence\_ids} & 保存可复用的长期记忆。 \\
+\code{CVERecord} & \code{cve\_id}、\code{cwes}、\code{affected\_products}、\code{cvss}、\code{kev}、\code{source\_hash} & 归一化漏洞情报记录。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{Evidence 与 Artifact 的分离}
+
+DigAgent 将“原始材料”和“可解释结论”分开存储。\code{ArtifactRecord} 保存附件、stdout/stderr、HTML、截图、下载文件等原始产物；\code{EvidenceRecord} 保存摘要、来源、结构化事实、confidence 和 sensitivity。这样既能保留复验材料，又能让报告和记忆引用更轻量、更可追踪。
+
+\section{安全设计}
+
+\subsection{最小权限与能力隔离}
+
+系统通过 profile allowlist、tool risk tags、interrupt-on、MCP allowlist、network scope 和 filesystem permissions 限制模型可见能力。未配置到 profile allowlist 的 project tool 不会出现在模型工具列表中；MCP server 也必须满足 manifest 可用性检查、环境变量要求和 session overrides 规则。
+
+\subsection{审批机制}
+
+高风险工具调用会触发 deepagents interrupt，后端创建 pending approval，前端或 CLI 审批后再通过 \code{Command(resume=...)} 恢复执行。审批处理失败会显式将 turn 标记为 failed，不通过静默 fallback 掩盖错误。
+
+\begin{longtable}{L{0.22\textwidth}L{0.30\textwidth}L{0.38\textwidth}}
+\caption{安全控制点}\label{tab:security}\\
+\toprule
+控制点 & 当前位置 & 安全意义 \\
+\midrule
+\endfirsthead
+\toprule
+控制点 & 当前位置 & 安全意义 \\
+\midrule
+\endhead
+工具白名单 & Agent profile 与 ToolAllowlistMiddleware & 限制不同 Agent 可见工具，减少越权调用面。 \\
+风险标签 & Tool manifest 与 permissions 逻辑 & 将 shell、外部利用、开放世界侦察等高风险行为升级为审批。 \\
+文件权限 & deepagents FilesystemPermission & 对 workspace 文件读写范围施加路径规则。 \\
+审批记录 & \code{ApprovalRecord} 与 approval API & 保存 action、digest、resolver、reason 和状态。 \\
+事件持久化 & \code{TurnEvent} 与 NDJSON & 提供可复盘的流式事件和审计线索。 \\
+证据链 & Evidence + Artifact + Report & 支持报告结论回溯到原始产物和执行过程。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{安全边界声明}
+
+当前 workspace 是应用层隔离，不提供容器、虚拟机或 OS 级强隔离。\code{shell\_exec} 和 \code{python\_exec} 虽然需要审批，但一旦获批仍会执行真实命令。项目因此更适合作为受控分析工作台，而不是用于直接运行未知恶意样本的强沙盒。对于高风险样本，应结合外部容器、虚拟机、EDR/沙箱或只读挂载环境使用。
+
+\section{测试与验证}
+
+\subsection{现有测试范围}
+
+上传技术文档与仓库结构显示，后端 pytest 覆盖了 turn API 合约、session/turn 创建、消息路由、mentions、附件关联、storage contract、session schema、turn event、approval 过滤和 legacy approval 处理、TurnManager 事件持久化、审批恢复、supersede、runtime catalog、skill/tool/MCP manifest、interrupt config、project tools、report export 以及 CVE service 等方面。
+
+前端使用 \code{node --test}，覆盖 permissions store、timeline utils、semantic timeline、workspace controller、turn utils、catalog/settings store、UI copy、chat utils、conversation items、inspector store 和 composer mention/input 行为。
+
+\subsection{推荐验证命令}
+
+\begin{lstlisting}[language=bash,caption={推荐后端与前端验证命令}]
+# 安装 Python 依赖
+uv sync --all-extras
+
+# 后端测试，建议增加超时限制
+TMPDIR=/tmp timeout 60 ./.venv/bin/python -m pytest -q -p no:cacheprovider
+
+# 前端测试与构建
+cd webui && npm install
+cd webui && npm test
+cd webui && npm run build
+\end{lstlisting}
+
+\subsection{本次报告验证边界}
+
+本次报告生成环境未提供项目所需的真实模型服务配置，也无法在容器内完成 GitHub clone，因此未运行完整后端测试、前端测试、服务启动和 WebUI 截图采集。本文对“当前实现”的判断来自公开仓库文件、README、\code{pyproject.toml}、核心模型文件、目录清单和上传技术文档。若用于课程验收，建议在本地或云主机中按上述命令补充运行记录与截图。
+
+\section{部署与运行}
+
+\subsection{环境要求}
+
+\begin{itemize}
+  \item Python 3.12 及以上。
+  \item Node.js 与 npm，用于 WebUI 安装、测试和构建。
+  \item 可用的 OpenAI-compatible 模型服务。
+  \item 可选环境变量：\code{NVD\_API\_KEY}、\code{GITHUB\_PERSONAL\_ACCESS\_TOKEN}、\code{SHODAN\_API\_KEY}。
+  \item PDF 导出需要 \code{webui/render-pdf.mjs} 或可用 Chrome headless。
+\end{itemize}
+
+\subsection{本地启动流程}
+
+\begin{lstlisting}[language=bash,caption={本地启动流程}]
+# 1. 安装 Python 依赖
+uv sync --all-extras
+
+# 2. 安装并构建 WebUI
+cd webui
+npm install
+npm run build
+cd ..
+
+# 3. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入 OPENAI_API_KEY、BASE_URL、MODEL 等
+
+# 4. 启动 API + SPA 前端
+python -m digagent serve
+\end{lstlisting}
+
+CLI 单次任务与交互式任务如下：
+
+\begin{lstlisting}[language=bash]
+python -m digagent run --task "分析当前项目源码"
+python -m digagent chat
+python -m digagent approve --session-id sess_xxx
+\end{lstlisting}
+
+\subsection{核心配置项}
+
+\begin{longtable}{L{0.40\textwidth}L{0.46\textwidth}}
+\caption{核心环境变量}\label{tab:env}\\
+\toprule
+变量 & 作用 \\
+\midrule
+\endfirsthead
+\toprule
+变量 & 作用 \\
+\midrule
+\endhead
+\code{OPENAI\_API\_KEY} & OpenAI-compatible 模型密钥。 \\
+\code{BASE\_URL} & 模型服务 base URL。 \\
+\code{MODEL} & 默认模型名。 \\
+\code{DIGAGENT\_USE\_FAKE\_MODEL} & 测试模式标记；真实运行时未配置模型会拒绝执行。 \\
+\code{NVD\_API\_KEY} & NVD API 可选密钥。 \\
+\code{GITHUB\_PERSONAL\_ACCESS\_TOKEN} & GitHub MCP server 所需令牌。 \\
+\code{SHODAN\_API\_KEY} & Shodan MCP server 所需密钥。 \\
+\code{MCP\_SERVERS\_DIR} & 自定义 MCP manifest 目录。 \\
+\code{APPROVAL\_TIMEOUT\_SEC} & 审批超时配置。 \\
+\bottomrule
+\end{longtable}
+
+\section{与废稿相比的关键修订}
+
+废稿 Word 技术文档给出了较完整的设想，但部分内容与当前公开代码不完全一致。本报告按“当前代码真实情况”做了以下修订：
+
+\begin{longtable}{L{0.28\textwidth}L{0.30\textwidth}L{0.32\textwidth}}
+\caption{废稿内容修订表}\label{tab:corrections}\\
+\toprule
+主题 & 废稿倾向表述 & 本报告修订 \\
+\midrule
+\endfirsthead
+\toprule
+主题 & 废稿倾向表述 & 本报告修订 \\
+\midrule
+\endhead
+执行主模型 & 使用 \code{Run} 和 \code{RunManager} 描述完整运行任务。 & 当前主模型为 \code{SessionRecord} + \code{TurnRecord}，报告统一改为 session/turn。 \\
+DAG 调度 & 独立 \code{GraphManager} 负责 ready 集、并行调度和动态重规划。 & 当前 \code{TaskGraph} 更准确地说是 deepagents/LangGraph stream 的观测模型，不写成已落地的自研调度器。 \\
+Agent 协作 & 由 Root Supervisor 统一拆解 DAG 并并行分发。 & 当前依托 deepagents subagent 能力和 mention 链路，按 addressed participants 执行。 \\
+Docker/CI/CD & 写成部署与运维能力。 & 当前仓库没有 Dockerfile、docker-compose 或 GitHub Actions workflow，列为未来方向。 \\
+多租户/RBAC & 可能被读成已实现账号体系。 & 当前是单机/单用户工作台方向，不写复杂 RBAC 已落地。 \\
+沙盒能力 & 容易被理解为强隔离执行环境。 & 明确 workspace 是应用层隔离，非 OS/容器级沙盒。 \\
+Plugin 命名 & 使用 Plugin 表示可执行能力包。 & 当前代码更多体现为 Project Tools + MCP manifest；报告采用当前命名。 \\
+\bottomrule
+\end{longtable}
+
+\section{项目总结与展望}
+
+\subsection{项目成果}
+
+DigAgent 当前已经形成一套可运行的安全分析 Agent Runtime：它以 session/turn 为执行骨架，以 deepagents/LangGraph 为模型执行基础，以 \code{.agents} 能力目录组织 profile、skill、tool 和 MCP，以文件化存储沉淀运行记录、审批、证据、产物和报告，并通过 WebUI 展示聊天、事件流、权限和 Inspector 详情。
+
+项目的价值在于将 LLM 安全分析过程显式工程化：模型不能绕过 tool manifest、profile allowlist、permission overrides 与 approval 机制直接获得执行能力；报告不是单纯自然语言总结，而是能够通过 evidence、artifact 和 report record 形成可复盘材料；前端也不默认加载所有原始事件，而是以实时流和按需详情降低历史膨胀。
+
+\subsection{不足与风险}
+
+当前仍需谨慎看待以下边界：
+
+\begin{itemize}
+  \item TaskGraph 是执行观测模型，而不是独立自研 DAG 调度器。
+  \item Workspace 是应用层隔离，不能替代容器、虚拟机或恶意样本沙箱。
+  \item 真实运行依赖外部 LLM API，模型质量、成本和可用性会影响使用体验。
+  \item 工具审批依赖用户理解动作含义，仍需优化审批卡片解释和风险提示。
+  \item 当前未提供 Docker、CI/CD、多租户、复杂 RBAC 和分布式调度资产。
+\end{itemize}
+
+\subsection{未来改进方向}
+
+后续可以从以下方面增强项目：
+
+\begin{enumerate}
+  \item 引入容器或微虚拟机沙盒，增强 \code{shell\_exec}/\code{python\_exec} 的执行隔离。
+  \item 将 TaskGraph 从观测模型逐步扩展为更强的计划/回放/重规划模型，但需保持与 deepagents stream 的一致性。
+  \item 补齐 Dockerfile、docker-compose、GitHub Actions 或其他 CI/CD 流程，并明确生产部署边界。
+  \item 强化审计日志的不可篡改性，例如加入哈希链、签名或外部日志系统。
+  \item 优化 WebUI Inspector、审批卡片和报告编辑体验，使非开发者也能理解每一步动作与证据链。
+  \item 扩展 Skills 与 Project Tools，但保持知识层和执行层的边界，避免 Skill 直接获得执行能力。
+\end{enumerate}
+
+\appendix
+\section{主要源码索引}
+
+\begin{longtable}{p{0.52\textwidth}p{0.36\textwidth}}
+\caption{主要源码与目录索引}\label{tab:sourceindex}\\
+\toprule
+文件/目录 & 说明 \\
+\midrule
+\endfirsthead
+\toprule
+文件/目录 & 说明 \\
+\midrule
+\endhead
+\path{src/digagent/cli.py} & CLI 命令入口。 \\
+\path{src/digagent/api.py} & FastAPI 服务与 REST/SSE API。 \\
+\path{src/digagent/deepagents_manager.py} & TurnManager 主控制逻辑。 \\
+\path{src/digagent/deepagents_runtime/factory.py} & deepagents runtime 构建入口。 \\
+\path{src/digagent/deepagents_runtime/project_tools.py} & Project tool manifest 加载与 StructuredTool 构建。 \\
+\path{src/digagent/deepagents_runtime/permissions.py} & allowlist、interrupt 和权限策略。 \\
+\path{src/digagent/deepagents_runtime/workspace.py} & workspace 创建与附件物化。 \\
+\path{src/digagent/storage/files.py} & 文件化存储实现。 \\
+\path{src/digagent/report/exporter.py} & 报告 Markdown/HTML/PDF 导出。 \\
+\path{src/digagent/cve_service.py} & CVE/KEV 同步和检索。 \\
+\path{.agents/subagents/} & Agent profile 与 prompt。 \\
+\path{.agents/tools/} & Project tool manifest 与脚本。 \\
+\path{.agents/skills/} & 本地 Skill。 \\
+\path{.agents/mcp/} & MCP server manifest。 \\
+\path{webui/src/} & React WebUI 源码。 \\
+\bottomrule
+\end{longtable}
+
+\section{术语表}
+
+\begin{longtable}{p{0.24\textwidth}p{0.22\textwidth}p{0.44\textwidth}}
+\caption{术语表}\label{tab:terms}\\
+\toprule
+术语 & 全称/类型 & 说明 \\
+\midrule
+\endfirsthead
+\toprule
+术语 & 全称/类型 & 说明 \\
+\midrule
+\endhead
+Agent Runtime & 智能体运行时 & 负责模型调用、工具暴露、事件流、checkpoint 和子 Agent 协作的运行框架。 \\
+Session & 会话 & 用户与系统的长期交互容器。 \\
+Turn & 单次执行 & 一次用户输入触发的受控任务执行单元。 \\
+TaskGraph & 任务图 & 当前主要作为 deepagents/LangGraph stream 的观测和展示模型。 \\
+Approval & 审批 & 高风险动作执行前的人工确认记录。 \\
+Evidence & 证据 & 支撑报告发现和记忆条目的结构化事实。 \\
+Artifact & 产物 & 原始文件、附件、stdout/stderr、HTML、PDF 等材料。 \\
+Skill & 技能/知识包 & 存放方法论、Prompt 和参考资料，不直接授予执行权限。 \\
+Project Tool & 项目工具 & 由 manifest 与脚本定义的可执行能力，受权限和审批控制。 \\
+MCP & Model Context Protocol & 外部工具/服务接入协议，当前以 manifest 方式受控注入。 \\
+KEV & Known Exploited Vulnerabilities & CISA 已知被利用漏洞目录。 \\
+\bottomrule
+\end{longtable}
+
+\section{参考资料}
+
+\begin{thebibliography}{9}
+\bibitem{repo} xjtu-wang. \textit{DigAgent GitHub Repository}. \url{https://github.com/xjtu-wang/DigAgent}
+\bibitem{readme} DigAgent README. \url{https://github.com/xjtu-wang/DigAgent/blob/main/README.md}
+\bibitem{pyproject} DigAgent \code{pyproject.toml}. \url{https://github.com/xjtu-wang/DigAgent/blob/main/pyproject.toml}
+\bibitem{deepagents} LangChain. \textit{Deep Agents Documentation}. \url{https://docs.langchain.com/oss/python/deepagents/overview}
+\bibitem{langgraph} LangChain. \textit{LangGraph Documentation}. \url{https://docs.langchain.com/oss/python/langgraph/overview}
+\bibitem{nvd} NIST. \textit{National Vulnerability Database}. \url{https://nvd.nist.gov/}
+\bibitem{cisa-kev} CISA. \textit{Known Exploited Vulnerabilities Catalog}. \url{https://www.cisa.gov/known-exploited-vulnerabilities-catalog}
+\end{thebibliography}
+
+\end{document}

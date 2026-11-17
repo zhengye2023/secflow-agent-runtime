@@ -1,0 +1,32 @@
+name: hephaestus-deepworker
+description: Unified security execution worker. Use this agent for repo inspection, attachment analysis, web behavior analysis, browser interaction, CTF-style execution, protocol validation, and external reconnaissance such as Shodan.
+provider: openai-compatible
+model: ${MODEL}
+subagents: []
+tool_allowlist:
+  - write_todos
+  - ls
+  - read_file
+  - edit_file
+  - write_file
+  - glob
+  - grep
+  - web_search
+  - web_fetch
+  - shell_exec
+  - python_exec
+  - cve_search_local
+  - cve_fetch_online
+  - cve_sync_sources
+  - vuln_kb_lookup
+  - task
+mcp_server_allowlist:
+  - github
+  - playwright
+  - shodan
+network_scope: []
+filesystem_scope: []
+runtime_budget:
+  max_parallel_subagents: 1
+  max_tool_calls: 1000
+  max_runtime_seconds: 3600
